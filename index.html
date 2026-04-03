@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Sync Cinema</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --text-color: #f8fafc;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --border: #334155;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        header {
+            background-color: var(--panel-bg);
+            padding: 1rem 2rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Left Side - Video Player */
+        .player-section {
+            flex: 3;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            background-color: #000;
+        }
+
+        video {
+            width: 100%;
+            max-height: 80vh;
+            border-radius: 8px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            background: #000;
+        }
+
+        /* Right Side - Playlist & Controls */
+        .sidebar {
+            flex: 1;
+            background-color: var(--panel-bg);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            min-width: 300px;
+        }
+
+        .upload-section {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .playlist-section {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.5rem;
+        }
+
+        h2 { font-size: 1.2rem; margin-bottom: 1rem; color: #cbd5e1; }
+
+        input[type="file"] {
+            display: block;
+            margin-bottom: 1rem;
+            color: #94a3b8;
+        }
+
+        button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            width: 100%;
+            transition: background 0.2s;
+        }
+
+        button:hover { background-color: var(--accent-hover); }
+
+        #uploadStatus {
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+            color: #10b981; /* Green success */
+        }
+
+        .video-list {
+            list-style: none;
+        }
+
+        .video-item {
+            padding: 0.75rem;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            word-break: break-all;
+        }
+
+        .video-item:hover { border-color: var(--accent); }
+        .video-item.active { border-color: var(--accent); border-left: 4px solid var(--accent); }
+
+        /* Responsive Layout */
+        @media (max-width: 768px) {
+            .main-container { flex-direction: column; }
+            .player-section { flex: none; padding: 0; }
+            video { border-radius: 0; max-height: 40vh; }
+            .sidebar { flex: 1; }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>🎥 Local Sync Cinema</h1>
+        <span id="connectionStatus" style="color: #10b981;">● Connected</span>
+    </header>
+
+    <div class="main-container">
+        <div class="player-section">
+            <video id="syncPlayer" controls preload="metadata">
+                <source src="" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+            <p id="nowPlaying" style="margin-top: 1rem; color: #94a3b8;">No video selected</p>
+        </div>
+
+        <div class="sidebar">
+            <div class="upload-section">
+                <h2>Upload New Video</h2>
+                <form id="uploadForm">
+                    <input type="file" id="videoFile" accept="video/mp4" required>
+                    <button type="submit">Upload & Share</button>
+                    <div id="uploadStatus"></div>
+                </form>
+            </div>
+
+            <div class="playlist-section">
+                <h2>Available Videos</h2>
+                <ul class="video-list" id="playlist">
+                    </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Socket.io connecting to the same host
+        const socket = io();
+        
+        const player = document.getElementById('syncPlayer');
+        const playlistEl = document.getElementById('playlist');
+        const uploadForm = document.getElementById('uploadForm');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const nowPlayingText = document.getElementById('nowPlaying');
+
+        // State variables
+        let isSyncing = false;
+        let syncTimeout = null;
+        const SYNC_THRESHOLD = 1.0; // seconds
+
+        // --- 1. Video List Management ---
+        
+        async function fetchVideos() {
+            try {
+                const res = await fetch('/videos_list');
+                const data = await res.json();
+                renderPlaylist(data.videos);
+            } catch (err) {
+                console.error("Failed to fetch videos", err);
+            }
+        }
+
+        function renderPlaylist(videos) {
+            playlistEl.innerHTML = '';
+            if (videos.length === 0) {
+                playlistEl.innerHTML = '<p style="color: #64748b; font-size: 0.9rem;">No videos found.</p>';
+                return;
+            }
+
+            videos.forEach(video => {
+                const li = document.createElement('li');
+                li.className = 'video-item';
+                li.textContent = video;
+                li.onclick = () => {
+                    socket.emit('change_video', { filename: video });
+                };
+                playlistEl.appendChild(li);
+            });
+        }
+
+        // --- 2. Upload Handling ---
+        
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fileInput = document.getElementById('videoFile');
+            const file = fileInput.files[0];
+            
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            uploadStatus.textContent = "Uploading... please wait.";
+            uploadStatus.style.color = "#fbbf24"; // yellow
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    uploadStatus.textContent = "Upload successful!";
+                    uploadStatus.style.color = "#10b981"; // green
+                    fileInput.value = ''; // clear input
+                } else {
+                    const err = await response.json();
+                    uploadStatus.textContent = "Error: " + err.detail;
+                    uploadStatus.style.color = "#ef4444"; // red
+                }
+            } catch (err) {
+                uploadStatus.textContent = "Network error during upload.";
+                uploadStatus.style.color = "#ef4444";
+            }
+        });
+
+        // --- 3. Synchronization Logic (Emitting) ---
+        
+        // Helper to send events only if they were initiated by the local user
+        function emitPlayerEvent(action) {
+            if (!isSyncing) {
+                socket.emit('client_event', { action: action, time: player.currentTime });
+            }
+        }
+
+        player.addEventListener('play', () => emitPlayerEvent('play'));
+        player.addEventListener('pause', () => emitPlayerEvent('pause'));
+        player.addEventListener('seeked', () => emitPlayerEvent('seek'));
+
+        // --- 4. Synchronization Logic (Receiving) ---
+
+        socket.on('sync_event', (data) => {
+            isSyncing = true;
+            clearTimeout(syncTimeout);
+
+            const serverTime = data.time;
+            const action = data.action;
+
+            // Handle Seek: Only jump if the difference is greater than the threshold
+            if (Math.abs(player.currentTime - serverTime) > SYNC_THRESHOLD) {
+                player.currentTime = serverTime;
+            }
+
+            // Handle Play/Pause
+            if (action === 'play') {
+                player.play().catch(e => {
+                    console.warn("Auto-play blocked by browser. User must click play.", e);
+                });
+            } else if (action === 'pause') {
+                player.pause();
+            }
+
+            // Reset the sync flag shortly after updating the player
+            syncTimeout = setTimeout(() => {
+                isSyncing = false;
+            }, 300);
+        });
+
+        socket.on('load_video', (data) => {
+            const filename = data.filename;
+            player.src = `/videos/${filename}`;
+            nowPlayingText.textContent = `Now Playing: ${filename}`;
+            
+            // Highlight active in playlist
+            document.querySelectorAll('.video-item').forEach(el => {
+                if(el.textContent === filename) el.classList.add('active');
+                else el.classList.remove('active');
+            });
+
+            player.play().catch(e => console.log("Play required user interaction", e));
+        });
+
+        // Refresh list when someone uploads a new file
+        socket.on('video_list_updated', () => {
+            fetchVideos();
+        });
+
+        // Connection UI updates
+        socket.on('connect', () => document.getElementById('connectionStatus').style.color = '#10b981');
+        socket.on('disconnect', () => document.getElementById('connectionStatus').style.color = '#ef4444');
+
+        // Init
+        fetchVideos();
+
+    </script>
+</body>
+  </html>
+
